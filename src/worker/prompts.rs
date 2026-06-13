@@ -1598,7 +1598,9 @@ Example Output:
             local_history.push(assistant_msg.clone());
             stage_history.push(assistant_msg);
 
-            if let Some(tool_calls) = resp.tool_calls {
+            if let Some(tool_calls) = resp.tool_calls
+                && !tool_calls.is_empty()
+            {
                 let mut tool_responses_map = std::collections::HashMap::new();
                 let mut calls_to_run = Vec::new();
 
