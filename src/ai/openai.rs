@@ -204,7 +204,7 @@ impl OpenAiCompatClient {
         };
 
         let path = match path.as_str() {
-            "" => "/chat/completions",
+            "" | "/chat/completions" => "/chat/completions",
             "/v1" | "/v1/chat/completions" => "/v1/chat/completions",
             "/api/v1" | "/api/v1/chat/completions" => "/api/v1/chat/completions",
             _ => return Err(anyhow::anyhow!("Invalid OpenAI url {}", url)),
@@ -1227,6 +1227,12 @@ mod tests {
         assert_eq!(
             OpenAiCompatClient::normalize_base_url("https://openai.com").unwrap(),
             "https://openai.com/chat/completions"
+        );
+        // DeepSeek style full unversioned path
+        assert_eq!(
+            OpenAiCompatClient::normalize_base_url("https://api.deepseek.com/chat/completions")
+                .unwrap(),
+            "https://api.deepseek.com/chat/completions"
         );
         // OpenRouter /api/v1 style paths
         assert_eq!(
