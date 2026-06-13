@@ -193,6 +193,18 @@ pub struct OpenAiCompatSettings {
     /// compatibility.
     #[serde(default)]
     pub use_json_schema: bool,
+    /// Field name for chain-of-thought / reasoning content in the
+    /// API response. Different providers use different field names
+    /// at `choices[0].message.<field>`:
+    ///
+    /// - DeepSeek, llama.cpp: `"reasoning_content"`
+    /// - vLLM, Ollama: `"reasoning"`
+    ///
+    /// When set, the value of this field is extracted and stored as
+    /// `thought` in `AiResponse`. Leave unset to disable reasoning
+    /// extraction.
+    #[serde(default)]
+    pub reasoning_field: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

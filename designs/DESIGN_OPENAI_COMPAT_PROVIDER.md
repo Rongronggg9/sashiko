@@ -14,7 +14,7 @@ The official OpenAI API uses `max_completion_tokens` in the request body (introd
 | Provider names | `"openai"` (official API, uses `max_completion_tokens`) and `"openai-compatible"` (third-party, uses `max_tokens`) |
 | Token limit field | `"openai"` serializes `max_completion_tokens`; `"openai-compatible"` serializes `max_tokens`. Controlled by `OpenAiProviderType` enum on the client. |
 | Stdio support | Not needed for OpenAI-compatible provider |
-| Thinking/reasoning support | Not included in initial implementation (`thought: None` always) |
+| Thinking/reasoning support | Configurable via `reasoning_field` setting. The field name (e.g. `"reasoning_content"` for DeepSeek) is specified in `[ai.openai_compat]`. `OpenAiMessage` uses `#[serde(flatten)] extra` to capture arbitrary fields, enabling both extraction from API responses and insertion into requests (conversation history). When `reasoning_field` is set and an assistant message has `thought`, it is populated into `extra` during request translation. In responses, the field is extracted from `extra` after deserialization and mapped to `AiResponse.thought`. |
 | Temperature | Always passed through from `AiRequest` when present |
 | URL configuration | `base_url` from settings → model-based default (glm-*, moonshot-*, abab7-*, MiniMax-*, others) |
 | API key | `OPENAI_API_KEY` env only (fallback to `LLM_API_KEY`), no provider-specific keys |
@@ -71,6 +71,7 @@ pub struct OpenAiCompatClient {
     max_tokens: u32,  // Default: 4096
     provider_type: OpenAiProviderType,
     use_json_schema: bool,
+    reasoning_field: Option<String>,
     client: reqwest::Client,
 }
 ```
@@ -80,7 +81,7 @@ pub struct OpenAiCompatClient {
 | Struct | Key Fields |
 |---|---|
 | `OpenAiRequest` | `model`, `messages`, `tools?`, `temperature?`, `max_tokens?`, `max_completion_tokens?`, `response_format?` |
-| `OpenAiMessage` | `role`, `content?`, `tool_calls?`, `tool_call_id?` |
+| `OpenAiMessage` | `role`, `content?`, `tool_calls?`, `tool_call_id?`, `extra` (`#[serde(flatten)]`, captures unknown fields like `reasoning_content`) |
 | `OpenAiToolCall` | `id`, `type` ("function"), `function: OpenAiToolCallFunction` |
 | `OpenAiToolCallFunction` | `name`, `arguments` (JSON **string**, not object) |
 | `OpenAiTool` | `type` ("function"), `function: OpenAiFunction` |
@@ -130,10 +131,10 @@ pub enum OpenAiCompatError {
 
 | Method | Purpose |
 |---|---|
-| `new(base_url, provider_type, model, context_window_size, max_tokens, api_timeout_secs, use_json_schema) -> Self` | Build `reqwest::Client` with `Authorization: Bearer {key}` header (from `OPENAI_API_KEY` → `LLM_API_KEY` env), configurable timeout |
-| `post_request(&self, body: &Value) -> Result<OpenAiResponse, OpenAiCompatError>` | POST JSON `body` to `self.base_url`. Transport error → `TransientError(30s)` (error string sanitized via `redact_secret()`). On HTTP success, reads body as text and parses JSON; parse failure → `ApiError`. HTTP errors: 429 → `RateLimitExceeded` (`Retry-After` header parsed first; body regex `"Please retry in ([0-9.]+)s"` overrides if matched; default 60s), 401/403 → `AuthenticationError`, 500/502/503/504 → `TransientError(30s)`, other → `ApiError`. Includes logging of response tokens on success. |
-| `translate_ai_request(AiRequest, max_tokens, provider_type, use_json_schema) -> OpenAiRequest` | See translation mapping below |
-| `translate_ai_response(OpenAiResponse) -> AiResponse` | See translation mapping below |
+| `new(base_url, provider_type, model, context_window_size, max_tokens, api_timeout_secs, use_json_schema, reasoning_field) -> Self` | Build `reqwest::Client` with `Authorization: Bearer {key}` header (from `OPENAI_API_KEY` → `LLM_API_KEY` env), configurable timeout |
+| `post_request(&self, body: &Value) -> Result<OpenAiResponse, OpenAiCompatError>` | POST JSON `body` to `self.base_url`. Transport error → `TransientError(30s)` (error string sanitized via `redact_secret()`). On HTTP success, deserializes body into `OpenAiResponse` (unknown fields captured by `OpenAiMessage.extra` via `#[serde(flatten)]`). Reasoning extraction is deferred to `translate_ai_response`. HTTP errors: 429 → `RateLimitExceeded` (`Retry-After` header parsed first; body regex `"Please retry in ([0-9.]+)s"` overrides if matched; default 60s), 401/403 → `AuthenticationError`, 500/502/503/504 → `TransientError(30s)`, other → `ApiError`. |
+| `translate_ai_request(AiRequest, max_tokens, provider_type, use_json_schema, reasoning_field: &Option<String>) -> OpenAiRequest` | See translation mapping below. When `reasoning_field` is set and an assistant message has `thought`, the thought is inserted into `OpenAiMessage.extra` under the configured field name, ensuring multi-turn conversation history preserves reasoning content. |
+| `translate_ai_response(OpenAiResponse, reasoning_field: &Option<String>) -> AiResponse` | See translation mapping below. Extracts `thought` from `choices[0].message.extra[reasoning_field]` (if configured). |
 | `estimate_tokens_generic(AiRequest) -> usize` | Reuse `TokenBudget::estimate_tokens`. Must include `request.system` along with messages and tools. |
 
 #### Helper Methods
@@ -166,7 +167,7 @@ pub enum OpenAiCompatError {
 | `OpenAiResponse` | `AiResponse` |
 |---|---|
 | `choices[0].message.content` | `content` |
-| (no reasoning support) | `thought: None` |
+| `choices[0].message.<reasoning_field>` (via `extra` flatten map) | `thought` — extracted by `translate_ai_response` from `choices[0].message.extra[reasoning_field]`. `None` if `reasoning_field` is unset or the field is absent. |
 | `choices[0].message.tool_calls` | `tool_calls` — `function.arguments` (JSON string) parsed to `serde_json::Value`, `thought_signature: None` |
 | `usage.prompt_tokens` | `prompt_tokens` |
 | `usage.completion_tokens` | `completion_tokens` |
@@ -179,12 +180,12 @@ pub enum OpenAiCompatError {
 async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
     tracing::info!("Sending OpenAI request...");
 
-    let mut openai_req = translate_ai_request(request, self.max_tokens, self.provider_type, self.use_json_schema)?;
+    let mut openai_req = translate_ai_request(request, self.max_tokens, self.provider_type, self.use_json_schema, &self.reasoning_field)?;
     openai_req.model = self.model.clone();
 
     let resp_body = serde_json::to_value(&openai_req)?;
     let resp = self.post_request(&resp_body).await?;
-    translate_ai_response(resp)
+    translate_ai_response(resp, &self.reasoning_field)
 }
 
 fn estimate_tokens(&self, request: &AiRequest) -> usize {
@@ -199,7 +200,7 @@ fn get_capabilities(&self) -> ProviderCapabilities {
 }
 ```
 
-#### Tests (20 tests in `#[cfg(test)] mod tests`)
+#### Tests (23 tests in `#[cfg(test)] mod tests`)
 
 ##### Request Translation Tests
 
@@ -217,6 +218,8 @@ fn get_capabilities(&self) -> ProviderCapabilities {
 | 7.2 | `test_translate_request_json_null_schema_format` | `AiResponseFormat::Json { schema: None }` → `{"type": "json_object"}`. Standard JSON word injection applies when no message contains "json". |
 | 7.3 | `test_translate_request_json_schema_format` | `AiResponseFormat::Json { schema: Some(...) }` with `use_json_schema = true` → `{"type": "json_schema", "json_schema": {"name": "Response", "schema": ...}}`. No JSON word injection. |
 | 8 | `test_translate_request_temperature` | Temperature from `AiRequest` included in `OpenAiRequest.temperature`. |
+| 8.1 | `test_translate_request_thought_inserted_when_reasoning_field_set` | When `reasoning_field` is `Some("reasoning_content")` and an `AiRole::Assistant` message has `thought`, the thought value is inserted into `OpenAiMessage.extra` under the configured key. |
+| 8.2 | `test_translate_request_thought_not_inserted_when_reasoning_field_unset` | When `reasoning_field` is `None`, assistant messages with `thought` produce an empty `extra` map. |
 
 ##### Response Translation Tests
 
@@ -227,6 +230,7 @@ fn get_capabilities(&self) -> ProviderCapabilities {
 | 9.2 | `test_translate_response_cached_tokens_zero` | When `prompt_tokens_details.cached_tokens` is 0, `cached_tokens` is `Some(0)`. When `prompt_tokens_details` is `None`, `cached_tokens` is `None`. |
 | 10 | `test_translate_response_tool_calls` | `tool_calls` with `arguments` as JSON string → parsed `Vec<ToolCall>`. `thought_signature: None`. |
 | 11 | `test_translate_response_empty_choices` | Empty/missing `choices` → error. |
+| 11.1 | `test_translate_response_with_reasoning` | When `thought` is `Some(...)`, it maps to `AiResponse.thought`. `thought_signature` stays `None`. |
 
 ##### Token Estimation Test
 
@@ -256,6 +260,17 @@ pub struct OpenAiCompatSettings {
     /// Not all providers support this; leave false for broader compatibility.
     #[serde(default)]
     pub use_json_schema: bool,
+    /// Field name for chain-of-thought / reasoning content in the
+    /// API response. Different providers use different field names
+    /// at `choices[0].message.<field>`:
+    ///
+    /// - DeepSeek, llama.cpp: `"reasoning_content"`
+    /// - vLLM, Ollama: `"reasoning"`
+    ///
+    /// When set, the value is extracted and stored as `thought` in
+    /// `AiResponse`. Leave unset to disable.
+    #[serde(default)]
+    pub reasoning_field: Option<String>,
 }
 ```
 
@@ -305,6 +320,12 @@ Both arms share the same config-reading logic, differing only in `provider_type`
         .as_ref()
         .is_some_and(|c| c.use_json_schema);
 
+    let reasoning_field = settings
+        .ai
+        .openai_compat
+        .as_ref()
+        .and_then(|c| c.reasoning_field.clone());
+
     Ok(Arc::new(openai::OpenAiCompatClient::new(
         base_url,
         provider_type,
@@ -313,6 +334,7 @@ Both arms share the same config-reading logic, differing only in `provider_type`
         max_tokens,
         settings.ai.api_timeout_secs,
         use_json_schema,
+        reasoning_field,
     )))
 }
 ```
@@ -389,4 +411,15 @@ model = "gpt-4o"
 
 [ai.openai_compat]
 use_json_schema = true
+
+# DeepSeek — uses max_tokens, with reasoning_content extraction
+[ai]
+provider = "openai-compatible"
+model = "deepseek-v4-pro"
+
+[ai.openai_compat]
+base_url = "https://api.deepseek.com/chat/completions"
+reasoning_field = "reasoning_content"
+context_window_size = 245760
+max_tokens = 8192
 ```

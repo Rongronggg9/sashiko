@@ -104,6 +104,7 @@ Settings for OpenAI-compatible providers (`provider = "openai-compat"`).
 | `context_window_size` | integer | -- | Context window size (optional). |
 | `max_tokens` | integer | -- | Max output tokens (optional). |
 | `use_json_schema` | bool | `false` | Use `json_schema` response format for structured outputs (optional). |
+| `reasoning_field` | string | (disable extraction) | Field name for chain-of-thought / reasoning content in the API response (optional). |
 
 #### `[ai.kiro_cli]`
 
