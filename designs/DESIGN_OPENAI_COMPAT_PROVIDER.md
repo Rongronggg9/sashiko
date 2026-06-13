@@ -70,6 +70,7 @@ pub struct OpenAiCompatClient {
     context_window_size: usize,
     max_tokens: u32,  // Default: 4096
     provider_type: OpenAiProviderType,
+    use_json_schema: bool,
     client: reqwest::Client,
 }
 ```
@@ -86,7 +87,8 @@ pub struct OpenAiCompatClient {
 | `OpenAiFunction` | `name`, `description`, `parameters` |
 | `OpenAiResponse` | `choices`, `usage` |
 | `OpenAiChoice` | `index`, `message: OpenAiMessage`, `finish_reason` |
-| `OpenAiUsage` | `prompt_tokens`, `completion_tokens`, `total_tokens` |
+| `OpenAiUsage` | `prompt_tokens`, `completion_tokens`, `total_tokens`, `prompt_tokens_details: Option<OpenAiPromptTokensDetails>` |
+| `OpenAiPromptTokensDetails` | `cached_tokens: Option<u32>` — captured from `usage.prompt_tokens_details.cached_tokens` in the API response. `None` when the field is absent from the JSON; `Some(n)` otherwise (including `Some(0)`). |
 
 #### `OpenAiRequest` Token Limit Fields
 
@@ -128,9 +130,9 @@ pub enum OpenAiCompatError {
 
 | Method | Purpose |
 |---|---|
-| `new(base_url, provider_type, model, context_window_size, max_tokens) -> Self` | Build `reqwest::Client` with `Authorization: Bearer {key}` header (from `OPENAI_API_KEY` → `LLM_API_KEY` env), 120s timeout |
+| `new(base_url, provider_type, model, context_window_size, max_tokens, api_timeout_secs, use_json_schema) -> Self` | Build `reqwest::Client` with `Authorization: Bearer {key}` header (from `OPENAI_API_KEY` → `LLM_API_KEY` env), configurable timeout |
 | `post_request(&self, body: &Value) -> Result<OpenAiResponse, OpenAiCompatError>` | POST JSON `body` to `self.base_url`. Transport error → `TransientError(30s)` (error string sanitized via `redact_secret()`). On HTTP success, reads body as text and parses JSON; parse failure → `ApiError`. HTTP errors: 429 → `RateLimitExceeded` (`Retry-After` header parsed first; body regex `"Please retry in ([0-9.]+)s"` overrides if matched; default 60s), 401/403 → `AuthenticationError`, 500/502/503/504 → `TransientError(30s)`, other → `ApiError`. Includes logging of response tokens on success. |
-| `translate_ai_request(AiRequest, max_tokens, provider_type) -> OpenAiRequest` | See translation mapping below |
+| `translate_ai_request(AiRequest, max_tokens, provider_type, use_json_schema) -> OpenAiRequest` | See translation mapping below |
 | `translate_ai_response(OpenAiResponse) -> AiResponse` | See translation mapping below |
 | `estimate_tokens_generic(AiRequest) -> usize` | Reuse `TokenBudget::estimate_tokens`. Must include `request.system` along with messages and tools. |
 
@@ -152,7 +154,9 @@ pub enum OpenAiCompatError {
 | `AiRole::Tool` message | `{ role: "tool", tool_call_id, content }` |
 | `tools` | `[{ type: "function", function: { name, description, parameters } }]` |
 | `temperature` | Passed through directly when present |
-| `response_format: Json` | `{ type: "json_object" }`. **JSON word injection:** OpenAI requires the word "json" to appear in at least one message when using `json_object` mode. If no message already contains "json" (case-insensitive), the provider appends `"\nRespond in JSON format."` to the first system message, or prepends a new system message `"Respond in JSON format."` if none exists. |
+| `response_format: Json { schema: None }` | `{ type: "json_object" }`. **JSON word injection:** OpenAI requires the word "json" to appear in at least one message when using `json_object` mode. If no message already contains "json" (case-insensitive), the provider appends `"\nRespond in JSON format."` to the first system message, or prepends a new system message `"Respond in JSON format."` if none exists. |
+| `response_format: Json { schema: Some(s) }` (with `use_json_schema = true`) | `{ type: "json_schema", "json_schema": { "name": "Response", "schema": s } }`. This enables OpenAI structured outputs mode. No JSON word injection needed. |
+| `response_format: Json { schema: Some(_) }` (with `use_json_schema = false`) | `{ type: "json_object" }` (schema is ignored, standard behavior). |
 | `response_format: Text` | `{ type: "text" }` |
 | `OpenAiProviderType::OpenAi` | `{ max_completion_tokens: N }` (OpenAI) |
 | `OpenAiProviderType::OpenAiCompatible` | `{ max_tokens: N }` (OpenAI-compatible) |
@@ -167,7 +171,7 @@ pub enum OpenAiCompatError {
 | `usage.prompt_tokens` | `prompt_tokens` |
 | `usage.completion_tokens` | `completion_tokens` |
 | `usage.total_tokens` | `total_tokens` |
-| (no cached tokens in standard OpenAI) | `cached_tokens: None` |
+| `usage.prompt_tokens_details.cached_tokens` | `cached_tokens` — extracted if `prompt_tokens_details` and `cached_tokens` are both present in the response (including when `cached_tokens` is 0); `None` only when either field is absent |
 
 #### `impl AiProvider for OpenAiCompatClient`
 
@@ -175,7 +179,7 @@ pub enum OpenAiCompatError {
 async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
     tracing::info!("Sending OpenAI request...");
 
-    let mut openai_req = translate_ai_request(request, self.max_tokens, self.provider_type)?;
+    let mut openai_req = translate_ai_request(request, self.max_tokens, self.provider_type, self.use_json_schema)?;
     openai_req.model = self.model.clone();
 
     let resp_body = serde_json::to_value(&openai_req)?;
@@ -195,7 +199,7 @@ fn get_capabilities(&self) -> ProviderCapabilities {
 }
 ```
 
-#### Tests (16 tests in `#[cfg(test)] mod tests`)
+#### Tests (20 tests in `#[cfg(test)] mod tests`)
 
 ##### Request Translation Tests
 
@@ -210,6 +214,8 @@ fn get_capabilities(&self) -> ProviderCapabilities {
 | 6 | `test_translate_request_conversation_chain` | Full user → assistant (tool_calls) → tool response chain. Correct roles and ordering. |
 | 7 | `test_translate_request_json_format` | `AiResponseFormat::Json` → `{"type": "json_object"}`. When no message contains "json", a system message `"Respond in JSON format."` is prepended. |
 | 7.1 | `test_translate_request_json_format_no_injection_when_present` | When messages already contain "json" (case-insensitive), no additional system message is injected. |
+| 7.2 | `test_translate_request_json_null_schema_format` | `AiResponseFormat::Json { schema: None }` → `{"type": "json_object"}`. Standard JSON word injection applies when no message contains "json". |
+| 7.3 | `test_translate_request_json_schema_format` | `AiResponseFormat::Json { schema: Some(...) }` with `use_json_schema = true` → `{"type": "json_schema", "json_schema": {"name": "Response", "schema": ...}}`. No JSON word injection. |
 | 8 | `test_translate_request_temperature` | Temperature from `AiRequest` included in `OpenAiRequest.temperature`. |
 
 ##### Response Translation Tests
@@ -217,6 +223,8 @@ fn get_capabilities(&self) -> ProviderCapabilities {
 | # | Test Name | Verifies |
 |---|---|---|
 | 9 | `test_translate_response_text` | `choices[0].message.content` → `AiResponse.content`. `thought` is `None`. Usage mapped. |
+| 9.1 | `test_translate_response_cached_tokens` | `usage.prompt_tokens_details.cached_tokens` → `AiResponse.usage.cached_tokens: Some(n)` when `cached_tokens > 0`. |
+| 9.2 | `test_translate_response_cached_tokens_zero` | When `prompt_tokens_details.cached_tokens` is 0, `cached_tokens` is `Some(0)`. When `prompt_tokens_details` is `None`, `cached_tokens` is `None`. |
 | 10 | `test_translate_response_tool_calls` | `tool_calls` with `arguments` as JSON string → parsed `Vec<ToolCall>`. `thought_signature: None`. |
 | 11 | `test_translate_response_empty_choices` | Empty/missing `choices` → error. |
 
@@ -244,6 +252,10 @@ pub struct OpenAiCompatSettings {
     pub context_window_size: Option<usize>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Use `json_schema` response format for structured outputs.
+    /// Not all providers support this; leave false for broader compatibility.
+    #[serde(default)]
+    pub use_json_schema: bool,
 }
 ```
 
@@ -287,12 +299,20 @@ Both arms share the same config-reading logic, differing only in `provider_type`
         .and_then(|c| c.max_tokens)
         .unwrap_or(4096);
 
+    let use_json_schema = settings
+        .ai
+        .openai_compat
+        .as_ref()
+        .is_some_and(|c| c.use_json_schema);
+
     Ok(Arc::new(openai::OpenAiCompatClient::new(
         base_url,
         provider_type,
         settings.ai.model.clone(),
         context_window,
         max_tokens,
+        settings.ai.api_timeout_secs,
+        use_json_schema,
     )))
 }
 ```
@@ -361,4 +381,12 @@ model = "abab7-chat-preview" # or "MiniMax-M2.7"
 base_url = "https://api.minimax.chat/v1/text/chatcompletion_v2"
 context_window_size = 245760
 max_tokens = 8192
+
+# OpenAI with structured outputs (json_schema) — uses max_completion_tokens
+[ai]
+provider = "openai"
+model = "gpt-4o"
+
+[ai.openai_compat]
+use_json_schema = true
 ```

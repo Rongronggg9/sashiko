@@ -103,6 +103,7 @@ Settings for OpenAI-compatible providers (`provider = "openai-compat"`).
 | `base_url` | string | -- | API endpoint URL. |
 | `context_window_size` | integer | -- | Context window size (optional). |
 | `max_tokens` | integer | -- | Max output tokens (optional). |
+| `use_json_schema` | bool | `false` | Use `json_schema` response format for structured outputs (optional). |
 
 #### `[ai.kiro_cli]`
 
