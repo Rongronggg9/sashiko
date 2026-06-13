@@ -127,6 +127,7 @@ Settings for the OpenAI providers (`provider = "openai"` or `provider = "openai-
 | `context_window_size` | integer | model-derived | Context window size. `128000` for most models. |
 | `max_tokens` | integer | `4096` | Max output tokens per response. With `provider = "openai"` it is sent as `max_completion_tokens`, which bounds reasoning tokens as well as the reply. |
 | `use_json_schema` | bool | `false` | Use `json_schema` response format for structured outputs (optional). |
+| `reasoning_field` | string | `"reasoning_content"` | Field name for chain-of-thought / reasoning content in the API response (optional). |
 
 #### `[ai.kiro_cli]`
 

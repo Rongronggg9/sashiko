@@ -246,6 +246,17 @@ pub struct OpenAiCompatSettings {
     /// compatibility.
     #[serde(default)]
     pub use_json_schema: bool,
+    /// Field name for chain-of-thought / reasoning content in the
+    /// API response. Different providers use different field names
+    /// at `choices[0].message.<field>`:
+    ///
+    /// - DeepSeek, llama.cpp: `"reasoning_content"`
+    /// - vLLM, Ollama: `"reasoning"`
+    ///
+    /// When set, the value of this field is extracted and stored as
+    /// `thought` in `AiResponse`. Defaults to `"reasoning_content"`.
+    #[serde(default = "default_reasoning_field")]
+    pub reasoning_field: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -309,6 +320,10 @@ fn default_kiro_cli_binary() -> String {
 
 fn default_kiro_cli_context_window() -> usize {
     200_000
+}
+
+fn default_reasoning_field() -> Option<String> {
+    Some("reasoning_content".to_string())
 }
 
 #[derive(Debug, Deserialize, Clone)]
