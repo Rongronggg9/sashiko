@@ -84,10 +84,41 @@ pub struct ReviewInput {
     pub patches: Vec<PatchInput>,
 }
 
-fn validate_inline_format(content: &str) -> std::result::Result<(), String> {
-    if content.lines().any(|l| l.trim_start().starts_with("```")) {
-        return Err("The output contains Markdown code blocks ('```'). It must be plain text as per `inline-template.md`.".to_string());
+fn extract_inline_content(content: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+    // Not a meaningful output anyway.
+    if total_lines <= 15 {
+        return None;
     }
+    // Opening ``` must be in the first 5 lines, exact match only (no language tag or nested one).
+    let open_idx = lines[..5].iter().position(|l| l.trim() == "```")?;
+    // Closing ``` must be in the last 5 lines.
+    let suffix_start = total_lines.saturating_sub(5);
+    let close_idx = suffix_start
+        + lines[suffix_start..]
+            .iter()
+            .position(|l| l.trim() == "```")?;
+    // Nested or multiple code blocks? Nah.
+    let inner = &lines[open_idx + 1..close_idx];
+    if inner.iter().any(|l| l.contains("```")) {
+        return None;
+    }
+    Some(inner.join("\n"))
+}
+
+fn validate_inline_format(raw_content: &str) -> std::result::Result<String, String> {
+    let content = if raw_content
+        .lines()
+        .any(|l| l.trim_start().starts_with("```"))
+    {
+        match extract_inline_content(raw_content) {
+            Some(c) => c,
+            None => return Err("The output contains Markdown code blocks ('```'). It must be plain text as per `inline-template.md`.".to_string()),
+        }
+    } else {
+        raw_content.to_string()
+    };
     if !content.lines().any(|l| l.trim_start().starts_with(">")) {
         return Err("The output does not appear to quote any code or context using '>'. Please follow the quoting style in `inline-template.md`.".to_string());
     }
@@ -119,7 +150,7 @@ fn validate_inline_format(content: &str) -> std::result::Result<(), String> {
     if !has_comments {
         return Err("The output appears to lack any comments or summary. You must include a summary and interspersed comments explaining the findings.".to_string());
     }
-    Ok(())
+    Ok(content)
 }
 pub struct WorkerConfig {
     pub max_input_tokens: usize,
@@ -1381,8 +1412,8 @@ Example Output:
                             break;
                         } else {
                             match validate_inline_format(&result_text) {
-                                Ok(_) => {
-                                    review_inline_text = result_text;
+                                Ok(extracted) => {
+                                    review_inline_text = extracted;
                                     break;
                                 }
                                 Err(violation) => {
@@ -2732,5 +2763,289 @@ mod tests {
         if let Err(e) = &res {
             panic!("Expected run to succeed, got error: {:?}", e);
         }
+    }
+
+    fn make_inline_report() -> String {
+        "\
+commit abcdef123456
+Author: Some Author
+Date: today
+Link: something
+
+> Some code
+
+This looks good.
+This is a review comment.
+More analysis here.
+The change is sound.
+No issues found.
+Overall good.
+LGTM.
+Nice work.
+Keep it up.
+Good job."
+            .to_string()
+    }
+
+    #[test]
+    fn test_validate_inline_format_plain_passes() {
+        let content = make_inline_report();
+        let result = validate_inline_format(&content);
+        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+        assert_eq!(result.unwrap(), content);
+    }
+
+    #[test]
+    fn test_validate_inline_format_plain_missing_commit() {
+        let content = "\
+Author: Some Author
+Date: today
+
+> Some code
+
+This looks good.
+This is a review comment.
+More analysis here.
+The change is sound.
+No issues found.
+Overall good.
+LGTM.
+Nice work.
+Keep it up.
+Good job.
+Another line.
+Yet another.";
+        let result = validate_inline_format(&content);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("commit"));
+    }
+
+    #[test]
+    fn test_validate_inline_format_extracts_code_block() {
+        let inner = make_inline_report();
+        let raw = format!("```\n{}\n```", inner);
+        let result = validate_inline_format(&raw);
+        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+        assert_eq!(result.unwrap(), inner);
+    }
+
+    #[test]
+    fn test_validate_inline_format_code_block_too_short() {
+        let raw = "```\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\n```";
+        assert!(validate_inline_format(raw).is_err());
+    }
+
+    #[test]
+    fn test_validate_inline_format_code_block_open_not_in_first_5() {
+        let raw = "\
+Preamble line 0
+Preamble line 1
+Preamble line 2
+Preamble line 3
+Preamble line 4
+```
+commit abcdef123456
+Author: Some Author
+Date: today
+Link: something
+
+> Some code
+
+This looks good.
+This is a review comment.
+More analysis here.
+The change is sound.
+No issues found.
+Overall good.
+LGTM.
+Good job.
+```";
+        assert!(validate_inline_format(raw).is_err());
+    }
+
+    #[test]
+    fn test_validate_inline_format_code_block_language_tag() {
+        let inner = make_inline_report();
+        let raw = format!("```text\n{}\n```", inner);
+        assert!(validate_inline_format(&raw).is_err());
+    }
+
+    #[test]
+    fn test_validate_inline_format_code_block_close_not_in_last_5() {
+        let raw = "\
+```
+commit abcdef123456
+Author: Some Author
+Date: today
+Link: something
+
+> Some code
+
+This looks good.
+This is a review comment.
+More analysis here.
+The change is sound.
+No issues found.
+Overall good.
+LGTM.
+Good job.
+```
+Postamble 0
+Postamble 1
+Postamble 2
+Postamble 3
+Postamble 4
+Extra to push close out
+";
+        assert!(validate_inline_format(raw).is_err());
+    }
+
+    #[test]
+    fn test_validate_inline_format_code_block_nested() {
+        let raw = "\
+```
+commit abcdef123456
+Author: Some Author
+Date: today
+Link: something
+
+> Some code
+
+```  
+This is a review comment.
+More analysis here.
+The change is sound.
+No issues found.
+Overall good.
+LGTM.
+Good job.
+```";
+        assert!(validate_inline_format(raw).is_err());
+    }
+
+    #[test]
+    fn test_validate_inline_format_extracted_missing_commit() {
+        let raw = "\
+```
+Author: Some Author
+Date: today
+Link: something
+
+> Some code
+
+This looks good.
+This is a review comment.
+More analysis here.
+The change is sound.
+No issues found.
+Overall good.
+LGTM.
+Nice work.
+Good job.
+```";
+        let result = validate_inline_format(raw);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("commit"));
+    }
+
+    #[test]
+    fn test_extract_inline_content_returns_extracted() {
+        let inner = make_inline_report();
+        let raw = format!("```\n{}\n```", inner);
+        assert_eq!(extract_inline_content(&raw), Some(inner));
+    }
+
+    #[test]
+    fn test_extract_inline_content_too_short() {
+        let raw = "```\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\n```";
+        assert_eq!(extract_inline_content(raw), None);
+    }
+
+    #[test]
+    fn test_extract_inline_content_open_not_in_first_5() {
+        let raw = "\
+Preamble line 0
+Preamble line 1
+Preamble line 2
+Preamble line 3
+Preamble line 4
+```
+commit abcdef123456
+Author: Some Author
+Date: today
+Link: something
+
+> Some code
+
+This looks good.
+This is a review comment.
+More analysis here.
+The change is sound.
+No issues found.
+Overall good.
+LGTM.
+Good job.
+```";
+        assert_eq!(extract_inline_content(raw), None);
+    }
+
+    #[test]
+    fn test_extract_inline_content_language_tag() {
+        let inner = make_inline_report();
+        let raw = format!("```text\n{}\n```", inner);
+        assert_eq!(extract_inline_content(&raw), None);
+    }
+
+    #[test]
+    fn test_extract_inline_content_close_not_in_last_5() {
+        let raw = "\
+```
+commit abcdef123456
+Author: Some Author
+Date: today
+Link: something
+
+> Some code
+
+This looks good.
+This is a review comment.
+More analysis here.
+The change is sound.
+No issues found.
+Overall good.
+LGTM.
+Good job.
+```
+Postamble 0
+Postamble 1
+Postamble 2
+Postamble 3
+Postamble 4
+Extra to push close out
+";
+        assert_eq!(extract_inline_content(raw), None);
+    }
+
+    #[test]
+    fn test_extract_inline_content_nested() {
+        let raw = "\
+```
+commit abcdef123456
+Author: Some Author
+Date: today
+Link: something
+
+> Some code
+
+```  
+This is a review comment.
+More analysis here.
+The change is sound.
+No issues found.
+Overall good.
+LGTM.
+Good job.
+```";
+        assert_eq!(extract_inline_content(raw), None);
     }
 }
