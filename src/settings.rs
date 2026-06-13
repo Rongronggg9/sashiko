@@ -240,6 +240,12 @@ pub struct OpenAiCompatSettings {
     pub context_window_size: Option<usize>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Use `json_schema` response format instead of the default
+    /// `json_object` mode. Required for OpenAI structured outputs.
+    /// Not all providers support this; leave false for broader
+    /// compatibility.
+    #[serde(default)]
+    pub use_json_schema: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
