@@ -1,6 +1,23 @@
 # Stage 1: Build
 FROM rust:1.90-bookworm AS builder
 
+RUN \
+    sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/*
+
+ARG RUSTUP_UPDATE_ROOT=https://mirrors.cernet.edu.cn/rustup/rustup \
+    RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+
+COPY <<EOF /usr/local/cargo/config.toml
+[source.crates-io]
+replace-with = 'ustc'
+
+[source.ustc]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+
+[registries.ustc]
+index = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+EOF
+
 # Install clippy and rustfmt first to allow the persistent cache to cover them
 RUN rustup component add clippy rustfmt
 
@@ -34,6 +51,9 @@ RUN --mount=type=cache,target=/usr/src/sashiko/target/ \
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
+
+RUN \
+    sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/*
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
