@@ -548,7 +548,7 @@ fn translate_ai_response(
     });
 
     let content = choice.message.content;
-    let tool_calls = choice.message.tool_calls.map(|tc| {
+    let tool_calls = choice.message.tool_calls.filter(|v| !v.is_empty()).map(|tc| {
         tc.into_iter()
             .map(|t| {
                 let arguments: Value =
