@@ -601,20 +601,24 @@ fn translate_ai_response(
     });
 
     let content = choice.message.content;
-    let tool_calls = choice.message.tool_calls.map(|tc| {
-        tc.into_iter()
-            .map(|t| {
-                let arguments: Value =
-                    serde_json::from_str(&t.function.arguments).unwrap_or(serde_json::Value::Null);
-                ToolCall {
-                    id: t.id,
-                    function_name: t.function.name,
-                    arguments,
-                    thought_signature: None,
-                }
-            })
-            .collect()
-    });
+    let tool_calls = choice
+        .message
+        .tool_calls
+        .filter(|v| !v.is_empty())
+        .map(|tc| {
+            tc.into_iter()
+                .map(|t| {
+                    let arguments: Value = serde_json::from_str(&t.function.arguments)
+                        .unwrap_or(serde_json::Value::Null);
+                    ToolCall {
+                        id: t.id,
+                        function_name: t.function.name,
+                        arguments,
+                        thought_signature: None,
+                    }
+                })
+                .collect()
+        });
 
     let truncated = choice.finish_reason == "length";
 
