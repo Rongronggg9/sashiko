@@ -678,6 +678,11 @@ pub fn create_provider_from_ai(ai: &AiSettings) -> Result<Arc<dyn AiProvider>> {
 
             let use_json_schema = ai.openai_compat.as_ref().is_some_and(|c| c.use_json_schema);
 
+            let reasoning_field = ai
+                .openai_compat
+                .as_ref()
+                .and_then(|c| c.reasoning_field.clone());
+
             let provider = openai::OpenAiCompatClient::new(
                 base_url,
                 provider_type,
@@ -687,6 +692,7 @@ pub fn create_provider_from_ai(ai: &AiSettings) -> Result<Arc<dyn AiProvider>> {
                 ai.api_timeout_secs,
                 effort,
                 use_json_schema,
+                reasoning_field,
             )?;
 
             Ok(Arc::new(provider))
