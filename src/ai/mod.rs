@@ -676,6 +676,8 @@ pub fn create_provider_from_ai(ai: &AiSettings) -> Result<Arc<dyn AiProvider>> {
 
             let effort = ai.openai_compat.as_ref().and_then(|c| c.effort.clone());
 
+            let use_json_schema = ai.openai_compat.as_ref().is_some_and(|c| c.use_json_schema);
+
             let provider = openai::OpenAiCompatClient::new(
                 base_url,
                 provider_type,
@@ -684,6 +686,7 @@ pub fn create_provider_from_ai(ai: &AiSettings) -> Result<Arc<dyn AiProvider>> {
                 max_tokens,
                 ai.api_timeout_secs,
                 effort,
+                use_json_schema,
             )?;
 
             Ok(Arc::new(provider))

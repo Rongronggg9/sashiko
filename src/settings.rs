@@ -472,6 +472,12 @@ pub struct OpenAiCompatSettings {
     /// not implement it needs.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Use `json_schema` response format instead of the default
+    /// `json_object` mode. Required for OpenAI structured outputs.
+    /// Not all providers support this; leave false for broader
+    /// compatibility.
+    #[serde(default)]
+    pub use_json_schema: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
