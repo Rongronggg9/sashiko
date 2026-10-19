@@ -14,10 +14,11 @@
 
 //! Runtime execution engine for declarative workflows.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::ai::AiMessage;
+use crate::settings::Settings;
 
 use super::events::WorkflowEvent;
 use super::graph::{Workflow, WorkflowStep};
@@ -280,6 +281,39 @@ async fn execute_parallel_batch<S: Send + Sync + 'static>(
     event_cb: Option<&(dyn Fn(WorkflowEvent) + Send + Sync)>,
     outcome: &mut WorkflowOutcome,
 ) -> Result<()> {
+    let settings = Settings::new().context("Failed to load settings")?;
+
+    if settings.review.concurrency < 2 {
+        info!("Running {} stages serialized", stages.len());
+
+        for stage in stages.iter() {
+            let result = stage.execute(env, state, event_cb).await;
+
+            match result {
+                Ok(stage_outcome) => {
+                    outcome.tokens_in += stage_outcome.tokens_in;
+                    outcome.tokens_out += stage_outcome.tokens_out;
+                    outcome.tokens_cached += stage_outcome.tokens_cached;
+                    outcome.history.extend(stage_outcome.history);
+                }
+                Err(err) => match policy {
+                    ParallelPolicy::FailFast => {
+                        return Err(err);
+                    }
+                    ParallelPolicy::BestEffort => {
+                        warn!(
+                            "Parallel stage '{}' failed under BestEffort policy: {}",
+                            stage.name(),
+                            err
+                        );
+                    }
+                },
+            }
+        }
+
+        return Ok(());
+    }
+
     info!("Running {} stages concurrently", stages.len());
 
     match policy {
